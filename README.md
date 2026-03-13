@@ -1,44 +1,91 @@
-# POS Tax Calculation — Ports & Adapters
+# POS Tax Calculation — Hexagonal Architecture
 
-A NestJS application demonstrating the **Ports & Adapters (Hexagonal Architecture)** pattern through a POS FOC (Free of Charge) tax calculation system.
+A NestJS application following **Alistair Cockburn's Ports & Adapters (Hexagonal Architecture)** pattern through a POS FOC (Free of Charge) tax calculation system.
 
 ## Architecture
 
 ```
+                    Driving side                          Driven side
+                    (calls in)                            (called by app)
+
+              ┌──────────────────┐              ┌──────────────────────────┐
+              │  REST Controller │              │  HalfUpRoundingAdapter   │
+              │  (driving adapter)│              │  (driven adapter)        │
+              └────────┬─────────┘              └──────────▲───────────────┘
+                       │                                   │
+                       ▼                                   │
+              ┌────────────────┐                ┌──────────┴───────────────┐
+              │ CalculateTaxPort│               │ RoundingStrategyPort     │
+              │ (driving port)  │               │ (driven port)            │
+              └────────┬────────┘               └──────────▲───────────────┘
+                       │                                   │
+                       ▼                                   │
+              ┌────────────────────────────────────────────┴──┐
+              │              THE HEXAGON                       │
+              │                                                │
+              │  CalculateTaxUseCase                           │
+              │    - FOC treatment logic (BR-01..BR-04)        │
+              │    - Tax base calculation                      │
+              │    - Audit trail generation                    │
+              │                                                │
+              │  Domain: Money, Bill, LineItem, FocPolicy      │
+              └────────────────────────────┬──────────────────-┘
+                                           │
+                       ┌───────────────────┼───────────────────┐
+                       ▼                   ▼                   ▼
+              ┌────────────────┐ ┌─────────────────┐ ┌────────────────┐
+              │ JurisdictionRepo│ │ TaxAuditLogPort │ │ RoundingPort   │
+              │ (driven port)   │ │ (driven port)   │ │ (driven port)  │
+              └───────┬─────────┘ └────────┬────────┘ └────────────────┘
+                      ▼                    ▼
+              ┌──────────────────┐ ┌──────────────────┐
+              │ MySQL Adapter    │ │ MySQL Adapter     │
+              │ (driven adapter) │ │ (driven adapter)  │
+              └──────────────────┘ └──────────────────┘
+```
+
+### Directory Structure
+
+```
 src/
-  domain/                     # Pure business logic — zero framework dependencies
-    money.ts                  # Immutable monetary value object (bigint subunits)
-    types.ts                  # FocPolicy, Bill, LineItem, TaxResult, enums
-    ports/                    # Interfaces that define boundaries
-      tax-calculation.port    #   Primary: calculate(bill) → TaxResult
-      rounding-strategy.port  #   Secondary: apply(amount) → Money
-      tax-jurisdiction-repository.port
-      tax-audit-log.port
-  adapters/                   # Concrete implementations of ports
-    standard-exclusive-tax.adapter    # FOC tax calc (zero_rated, notional_value, merchant_absorbs)
-    half-up-rounding.adapter          # Commercial rounding to cents
-    persistence/                      # MySQL-backed adapters
-      entities/                       #   TypeORM entities
-      mysql-tax-jurisdiction-repository.adapter
-      mysql-tax-audit-log.adapter
-    in-memory-tax-jurisdiction-repository.adapter   # For testing
-    console-tax-audit-log.adapter                   # For testing
-  tax/                        # NestJS wiring layer
-    tax.module.ts             # Binds port tokens → adapter classes
-    tax.service.ts            # Application service (DTO → domain → port)
-    tax.controller.ts         # REST: POST /tax/calculate
-    dto/
+  application/                          # THE HEXAGON
+    domain/                             #   Value objects & entities
+      money.ts                          #     Immutable monetary value (bigint)
+      types.ts                          #     Bill, LineItem, FocPolicy, TaxResult, enums
+    ports/
+      driving/                          #   What the hexagon OFFERS
+        calculate-tax.port.ts           #     execute(command) → TaxResult
+      driven/                           #   What the hexagon NEEDS
+        rounding-strategy.port.ts       #     apply(amount) → Money
+        tax-jurisdiction-repository.port.ts
+        tax-audit-log.port.ts
+    use-cases/                          #   Business logic lives HERE
+      calculate-tax.use-case.ts         #     Implements driving port, uses driven ports
+  adapters/
+    driving/                            # OUTSIDE — calls into the hexagon
+      rest/
+        tax.controller.ts               #   HTTP → driving port
+        dto/calculate-tax.dto.ts
+    driven/                             # OUTSIDE — called by the hexagon
+      persistence/
+        entities/                       #   TypeORM entities
+        mysql-tax-jurisdiction-repository.adapter.ts
+        mysql-tax-audit-log.adapter.ts
+      rounding/
+        half-up-rounding.adapter.ts
+  tax.module.ts                         # Wiring: ports ↔ adapters
+  app.module.ts
+  main.ts
 ```
 
-### Dependency Rule
+### Key Principle
 
-Dependencies point inward. The domain never imports from adapters or framework code.
+**The hexagon has no dependencies on the outside world.**
 
-```
-Controller → Service → Port (interface) ← Adapter (implementation)
-```
-
-To swap infrastructure (e.g. MySQL → PostgreSQL), change the `useClass` in `tax.module.ts` — no domain code changes.
+- `CalculateTaxUseCase` implements the driving port and uses driven ports — it never imports from `adapters/`.
+- `TaxController` (driving adapter) only knows the driving port interface — it never imports the use case directly.
+- `MysqlTaxJurisdictionRepositoryAdapter` (driven adapter) implements the driven port — the hexagon never imports it.
+- `tax.module.ts` is the only place that connects ports to adapters.
 
 ## Prerequisites
 
@@ -101,24 +148,6 @@ curl -X POST http://localhost:3000/tax/calculate \
     "taxMode": "exclusive",
     "currency": "USD"
   }'
-```
-
-### Example Response
-
-```json
-{
-  "billId": "bill-001",
-  "totalTaxBase": 10.00,
-  "totalTaxAmount": 1.00,
-  "totalCustomerPays": 11.00,
-  "totalMerchantAbsorbs": 0.00,
-  "roundingDifference": 0.00,
-  "lineItems": [
-    { "lineItemId": "item-1", "originalPrice": 10.00, "effectiveTaxBase": 10.00, "taxAmount": 1.00, "customerPays": 10.00, "merchantAbsorbs": 0.00 },
-    { "lineItemId": "item-2", "originalPrice": 3.00, "effectiveTaxBase": 0.00, "taxAmount": 0.00, "customerPays": 0.00, "merchantAbsorbs": 0.00 }
-  ],
-  "auditTrail": [...]
-}
 ```
 
 ## FOC Tax Treatments

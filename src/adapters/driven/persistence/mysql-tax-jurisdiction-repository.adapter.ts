@@ -1,8 +1,8 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
-import type { TaxJurisdictionRepositoryPort } from '../../domain/ports/tax-jurisdiction-repository.port';
-import type { TaxJurisdiction } from '../../domain/types';
+import type { TaxJurisdictionRepositoryPort } from '../../../application/ports/driven/tax-jurisdiction-repository.port';
+import type { TaxJurisdiction } from '../../../application/domain/types';
 import { TaxJurisdictionEntity } from './entities/tax-jurisdiction.entity';
 
 @Injectable()

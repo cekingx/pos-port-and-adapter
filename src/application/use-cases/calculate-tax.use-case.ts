@@ -3,16 +3,24 @@ import { Money } from '../domain/money';
 import {
   AuditStep,
   Bill,
+  CalculateTaxCommand,
   LineItem,
   LineItemTaxResult,
   TaxResult,
 } from '../domain/types';
-import type { TaxCalculationPort } from '../domain/ports/tax-calculation.port';
-import type { RoundingStrategyPort } from '../domain/ports/rounding-strategy.port';
-import { ROUNDING_STRATEGY_PORT } from '../domain/ports/rounding-strategy.port';
+import type { CalculateTaxPort } from '../ports/driving/calculate-tax.port';
+import type { RoundingStrategyPort } from '../ports/driven/rounding-strategy.port';
+import { ROUNDING_STRATEGY_PORT } from '../ports/driven/rounding-strategy.port';
+import type { TaxJurisdictionRepositoryPort } from '../ports/driven/tax-jurisdiction-repository.port';
+import { TAX_JURISDICTION_REPOSITORY_PORT } from '../ports/driven/tax-jurisdiction-repository.port';
+import type { TaxAuditLogPort } from '../ports/driven/tax-audit-log.port';
+import { TAX_AUDIT_LOG_PORT } from '../ports/driven/tax-audit-log.port';
 
 /**
- * Primary adapter: calculates tax for exclusive-pricing bills with full FOC support.
+ * Use case: Calculate tax for a bill with FOC support.
+ *
+ * This is the INSIDE of the hexagon — it implements the driving port
+ * and uses driven ports to reach external systems.
  *
  * Follows BR-03 calculation order:
  *   1. Resolve line item prices
@@ -21,38 +29,88 @@ import { ROUNDING_STRATEGY_PORT } from '../domain/ports/rounding-strategy.port';
  *   4. Determine tax base per item based on FOC treatment
  *   5. Sum tax bases
  *   6. Apply tax rate to total tax base
- *   7. Apply rounding strategy
+ *   7. Apply rounding strategy (via driven port)
  *   8. Produce final tax amount
  */
 @Injectable()
-export class StandardExclusiveTaxAdapter implements TaxCalculationPort {
+export class CalculateTaxUseCase implements CalculateTaxPort {
   constructor(
     @Inject(ROUNDING_STRATEGY_PORT)
     private readonly roundingStrategy: RoundingStrategyPort,
+    @Inject(TAX_JURISDICTION_REPOSITORY_PORT)
+    private readonly jurisdictionRepo: TaxJurisdictionRepositoryPort,
+    @Inject(TAX_AUDIT_LOG_PORT)
+    private readonly auditLog: TaxAuditLogPort,
   ) {}
 
-  calculate(bill: Bill): TaxResult {
+  async execute(command: CalculateTaxCommand): Promise<TaxResult> {
+    // 1. Look up jurisdiction via driven port
+    const jurisdiction = await this.jurisdictionRepo.findByCode(
+      command.jurisdictionCode,
+    );
+    if (!jurisdiction) {
+      throw new Error(
+        `Unknown tax jurisdiction: ${command.jurisdictionCode}`,
+      );
+    }
+
+    // 2. Build domain Bill from command
+    const bill: Bill = {
+      id: command.billId,
+      lineItems: command.lineItems.map((item) => ({
+        id: item.id,
+        name: item.name,
+        originalPrice: Money.of(item.price, command.currency),
+        discountedPrice: Money.of(
+          item.discountedPrice ?? item.price,
+          command.currency,
+        ),
+        quantity: item.quantity,
+        isFoc: !!item.foc,
+        focPolicy: item.foc
+          ? { scope: 'item' as const, ...item.foc }
+          : null,
+      })),
+      billLevelFoc: command.billLevelFoc
+        ? { scope: 'bill' as const, ...command.billLevelFoc }
+        : null,
+      jurisdiction,
+      taxMode: command.taxMode,
+    };
+
+    // 3. Calculate tax
+    const result = this.calculateTax(bill);
+
+    // 4. Persist audit trail via driven port
+    await this.auditLog.persist(result);
+
+    return result;
+  }
+
+  // ─── Business Logic (BR-01 through BR-04) ───────────────────────
+
+  private calculateTax(bill: Bill): TaxResult {
     const auditTrail: AuditStep[] = [];
     const currency = bill.lineItems[0]?.originalPrice.currency ?? 'USD';
 
-    // Step 1-3: Resolve effective items (bill-level FOC overrides item-level)
+    // BR-01: Resolve effective items (bill-level FOC overrides item-level)
     const effectiveItems = this.resolveEffectiveItems(bill, auditTrail);
 
-    // Step 4: Calculate tax base per item
+    // BR-03 Step 4: Calculate tax base per item
     const lineItemResults = effectiveItems.map((item) =>
       this.calculateLineItemTax(item, bill, auditTrail),
     );
 
-    // Step 5: Sum tax bases
+    // BR-03 Step 5: Sum tax bases
     const totalTaxBase = lineItemResults.reduce(
       (acc, r) => acc.add(r.effectiveTaxBase),
       Money.zero(currency),
     );
 
-    // Step 6: Apply tax rate to total tax base (NOT sum of per-item taxes)
+    // BR-03 Step 6: Apply tax rate to total tax base (NOT sum of per-item taxes)
     const rawTax = totalTaxBase.multiplyByRate(bill.jurisdiction.rate);
 
-    // Step 7: Apply rounding ONCE on total
+    // BR-04: Apply rounding ONCE on total (via driven port)
     const roundedTax = this.roundingStrategy.apply(rawTax);
     const roundingDifference = roundedTax.subtract(rawTax);
 
@@ -64,7 +122,7 @@ export class StandardExclusiveTaxAdapter implements TaxCalculationPort {
       rule: 'BR-04: Rounding applied once at final total',
     });
 
-    // Step 8: Compute customer and merchant totals
+    // BR-03 Step 8: Compute customer and merchant totals
     const customerItemTotal = lineItemResults.reduce(
       (acc, r) => acc.add(r.customerPays),
       Money.zero(currency),
@@ -97,7 +155,6 @@ export class StandardExclusiveTaxAdapter implements TaxCalculationPort {
 
   /**
    * BR-01: Bill-level FOC takes precedence over item-level FOC.
-   * If bill has a bill-level FOC, all items inherit that policy.
    */
   private resolveEffectiveItems(
     bill: Bill,
@@ -156,7 +213,7 @@ export class StandardExclusiveTaxAdapter implements TaxCalculationPort {
   }
 
   /**
-   * Apply the correct FOC tax treatment policy:
+   * Apply FOC tax treatment policy:
    *   - zero_rated:       tax base = $0, no liability
    *   - notional_value:   tax base = original price, merchant absorbs item + tax
    *   - merchant_absorbs: tax base = full price, merchant covers everything
@@ -238,10 +295,8 @@ export class StandardExclusiveTaxAdapter implements TaxCalculationPort {
   }
 
   /**
-   * Determine what portion of the total (rounded) tax the customer pays.
-   *
-   * - If ALL items are merchant-absorbed or zero-rated → customer pays $0 tax
-   * - Otherwise → customer pays tax proportional to items they're charged for
+   * Determine what portion of the total tax the customer pays.
+   * If ALL items are merchant-absorbed or zero-rated → customer pays $0 tax.
    */
   private calculateCustomerTaxPortion(
     results: LineItemTaxResult[],
@@ -258,7 +313,6 @@ export class StandardExclusiveTaxAdapter implements TaxCalculationPort {
       return Money.zero(currency);
     }
 
-    // Customer pays tax only on items they're actually paying for
     const customerTaxBase = results
       .filter((r) => r.customerPays.isPositive())
       .reduce(

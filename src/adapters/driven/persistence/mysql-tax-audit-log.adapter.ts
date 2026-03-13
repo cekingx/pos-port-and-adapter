@@ -1,8 +1,8 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
-import type { TaxAuditLogPort } from '../../domain/ports/tax-audit-log.port';
-import type { TaxResult } from '../../domain/types';
+import type { TaxAuditLogPort } from '../../../application/ports/driven/tax-audit-log.port';
+import type { TaxResult } from '../../../application/domain/types';
 import { TaxAuditLogEntity } from './entities/tax-audit-log.entity';
 
 @Injectable()

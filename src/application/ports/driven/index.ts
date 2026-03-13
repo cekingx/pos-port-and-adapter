@@ -1,5 +1,3 @@
-export type { TaxCalculationPort } from './tax-calculation.port';
-export { TAX_CALCULATION_PORT } from './tax-calculation.port';
 export type { RoundingStrategyPort } from './rounding-strategy.port';
 export { ROUNDING_STRATEGY_PORT } from './rounding-strategy.port';
 export type { TaxJurisdictionRepositoryPort } from './tax-jurisdiction-repository.port';

@@ -1,9 +1,9 @@
 import { Injectable } from '@nestjs/common';
-import { Money } from '../domain/money';
-import { RoundingStrategyPort } from '../domain/ports';
+import { Money } from '../../../application/domain/money';
+import type { RoundingStrategyPort } from '../../../application/ports/driven/rounding-strategy.port';
 
 /**
- * Half-up rounding: rounds to the nearest cent (2 decimal places).
+ * Driven adapter: half-up rounding to the nearest cent.
  * When the digit is exactly 5, rounds away from zero (standard commercial rounding).
  *
  * Money stores 4 decimal places internally (1 unit = 10000 subunits).

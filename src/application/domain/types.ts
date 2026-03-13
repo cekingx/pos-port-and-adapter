@@ -83,6 +83,30 @@ export interface TaxResult {
   auditTrail: AuditStep[];
 }
 
+// ─── Command (input to the driving port) ─────────────────────────
+
+export interface CalculateTaxCommand {
+  billId: string;
+  lineItems: {
+    id: string;
+    name: string;
+    price: number;
+    discountedPrice?: number;
+    quantity: number;
+    foc?: {
+      reason: FocReason;
+      treatment: FocTaxTreatment;
+    };
+  }[];
+  billLevelFoc?: {
+    reason: FocReason;
+    treatment: FocTaxTreatment;
+  };
+  jurisdictionCode: string;
+  taxMode: TaxMode;
+  currency: string;
+}
+
 // ─── Default FOC Reason → Treatment mapping ─────────────────────
 
 export const DEFAULT_FOC_TREATMENT: Record<FocReason, FocTaxTreatment> = {
