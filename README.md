@@ -1,98 +1,154 @@
-<p align="center">
-  <a href="http://nestjs.com/" target="blank"><img src="https://nestjs.com/img/logo-small.svg" width="120" alt="Nest Logo" /></a>
-</p>
+# POS Tax Calculation — Ports & Adapters
 
-[circleci-image]: https://img.shields.io/circleci/build/github/nestjs/nest/master?token=abc123def456
-[circleci-url]: https://circleci.com/gh/nestjs/nest
+A NestJS application demonstrating the **Ports & Adapters (Hexagonal Architecture)** pattern through a POS FOC (Free of Charge) tax calculation system.
 
-  <p align="center">A progressive <a href="http://nodejs.org" target="_blank">Node.js</a> framework for building efficient and scalable server-side applications.</p>
-    <p align="center">
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/v/@nestjs/core.svg" alt="NPM Version" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/l/@nestjs/core.svg" alt="Package License" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/dm/@nestjs/common.svg" alt="NPM Downloads" /></a>
-<a href="https://circleci.com/gh/nestjs/nest" target="_blank"><img src="https://img.shields.io/circleci/build/github/nestjs/nest/master" alt="CircleCI" /></a>
-<a href="https://discord.gg/G7Qnnhy" target="_blank"><img src="https://img.shields.io/badge/discord-online-brightgreen.svg" alt="Discord"/></a>
-<a href="https://opencollective.com/nest#backer" target="_blank"><img src="https://opencollective.com/nest/backers/badge.svg" alt="Backers on Open Collective" /></a>
-<a href="https://opencollective.com/nest#sponsor" target="_blank"><img src="https://opencollective.com/nest/sponsors/badge.svg" alt="Sponsors on Open Collective" /></a>
-  <a href="https://paypal.me/kamilmysliwiec" target="_blank"><img src="https://img.shields.io/badge/Donate-PayPal-ff3f59.svg" alt="Donate us"/></a>
-    <a href="https://opencollective.com/nest#sponsor"  target="_blank"><img src="https://img.shields.io/badge/Support%20us-Open%20Collective-41B883.svg" alt="Support us"></a>
-  <a href="https://twitter.com/nestframework" target="_blank"><img src="https://img.shields.io/twitter/follow/nestframework.svg?style=social&label=Follow" alt="Follow us on Twitter"></a>
-</p>
-  <!--[![Backers on Open Collective](https://opencollective.com/nest/backers/badge.svg)](https://opencollective.com/nest#backer)
-  [![Sponsors on Open Collective](https://opencollective.com/nest/sponsors/badge.svg)](https://opencollective.com/nest#sponsor)-->
+## Architecture
 
-## Description
-
-[Nest](https://github.com/nestjs/nest) framework TypeScript starter repository.
-
-## Project setup
-
-```bash
-$ npm install
+```
+src/
+  domain/                     # Pure business logic — zero framework dependencies
+    money.ts                  # Immutable monetary value object (bigint subunits)
+    types.ts                  # FocPolicy, Bill, LineItem, TaxResult, enums
+    ports/                    # Interfaces that define boundaries
+      tax-calculation.port    #   Primary: calculate(bill) → TaxResult
+      rounding-strategy.port  #   Secondary: apply(amount) → Money
+      tax-jurisdiction-repository.port
+      tax-audit-log.port
+  adapters/                   # Concrete implementations of ports
+    standard-exclusive-tax.adapter    # FOC tax calc (zero_rated, notional_value, merchant_absorbs)
+    half-up-rounding.adapter          # Commercial rounding to cents
+    persistence/                      # MySQL-backed adapters
+      entities/                       #   TypeORM entities
+      mysql-tax-jurisdiction-repository.adapter
+      mysql-tax-audit-log.adapter
+    in-memory-tax-jurisdiction-repository.adapter   # For testing
+    console-tax-audit-log.adapter                   # For testing
+  tax/                        # NestJS wiring layer
+    tax.module.ts             # Binds port tokens → adapter classes
+    tax.service.ts            # Application service (DTO → domain → port)
+    tax.controller.ts         # REST: POST /tax/calculate
+    dto/
 ```
 
-## Compile and run the project
+### Dependency Rule
 
-```bash
-# development
-$ npm run start
+Dependencies point inward. The domain never imports from adapters or framework code.
 
-# watch mode
-$ npm run start:dev
-
-# production mode
-$ npm run start:prod
+```
+Controller → Service → Port (interface) ← Adapter (implementation)
 ```
 
-## Run tests
+To swap infrastructure (e.g. MySQL → PostgreSQL), change the `useClass` in `tax.module.ts` — no domain code changes.
+
+## Prerequisites
+
+- Node.js >= 18
+- MySQL
+
+## Setup
+
+```bash
+npm install
+```
+
+Create a `.env` file in the project root:
+
+```env
+DB_HOST=localhost
+DB_PORT=3306
+DB_USERNAME=root
+DB_PASSWORD=
+DB_DATABASE=pos
+NODE_ENV=development
+```
+
+Create the database:
+
+```sql
+CREATE DATABASE pos;
+```
+
+Tables are created automatically via TypeORM `synchronize` in development mode.
+
+## Running
+
+```bash
+# development (watch mode)
+npm run start:dev
+
+# production
+npm run build
+npm run start:prod
+```
+
+## API Documentation
+
+Swagger UI is available at [http://localhost:3000/api](http://localhost:3000/api) when the app is running.
+
+### Example Request
+
+```bash
+curl -X POST http://localhost:3000/tax/calculate \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "billId": "bill-001",
+    "items": [
+      { "id": "item-1", "name": "Burger", "price": 10.00, "quantity": 1 },
+      { "id": "item-2", "name": "Drink", "price": 3.00, "quantity": 1,
+        "foc": { "reason": "promotional", "treatment": "zero_rated" } }
+    ],
+    "jurisdictionCode": "DEFAULT",
+    "taxMode": "exclusive",
+    "currency": "USD"
+  }'
+```
+
+### Example Response
+
+```json
+{
+  "billId": "bill-001",
+  "totalTaxBase": 10.00,
+  "totalTaxAmount": 1.00,
+  "totalCustomerPays": 11.00,
+  "totalMerchantAbsorbs": 0.00,
+  "roundingDifference": 0.00,
+  "lineItems": [
+    { "lineItemId": "item-1", "originalPrice": 10.00, "effectiveTaxBase": 10.00, "taxAmount": 1.00, "customerPays": 10.00, "merchantAbsorbs": 0.00 },
+    { "lineItemId": "item-2", "originalPrice": 3.00, "effectiveTaxBase": 0.00, "taxAmount": 0.00, "customerPays": 0.00, "merchantAbsorbs": 0.00 }
+  ],
+  "auditTrail": [...]
+}
+```
+
+## FOC Tax Treatments
+
+| Treatment | Tax Base | Customer Pays | Merchant Absorbs |
+|---|---|---|---|
+| `zero_rated` | $0 | $0 | $0 (no tax liability) |
+| `notional_value` | Original price | $0 | Item price + tax |
+| `merchant_absorbs` | Full price | $0 | Full price + tax |
+
+## FOC Reasons → Default Treatments
+
+| Reason | Default Treatment |
+|---|---|
+| `promotional` | `zero_rated` |
+| `service_recovery` | `zero_rated` |
+| `staff_consumption` | `notional_value` |
+| `damaged_goods` | `zero_rated` |
+| `complimentary_bill` | `merchant_absorbs` |
+
+## Tests
 
 ```bash
 # unit tests
-$ npm run test
-
-# e2e tests
-$ npm run test:e2e
+npm run test
 
 # test coverage
-$ npm run test:cov
+npm run test:cov
 ```
-
-## Deployment
-
-When you're ready to deploy your NestJS application to production, there are some key steps you can take to ensure it runs as efficiently as possible. Check out the [deployment documentation](https://docs.nestjs.com/deployment) for more information.
-
-If you are looking for a cloud-based platform to deploy your NestJS application, check out [Mau](https://mau.nestjs.com), our official platform for deploying NestJS applications on AWS. Mau makes deployment straightforward and fast, requiring just a few simple steps:
-
-```bash
-$ npm install -g @nestjs/mau
-$ mau deploy
-```
-
-With Mau, you can deploy your application in just a few clicks, allowing you to focus on building features rather than managing infrastructure.
-
-## Resources
-
-Check out a few resources that may come in handy when working with NestJS:
-
-- Visit the [NestJS Documentation](https://docs.nestjs.com) to learn more about the framework.
-- For questions and support, please visit our [Discord channel](https://discord.gg/G7Qnnhy).
-- To dive deeper and get more hands-on experience, check out our official video [courses](https://courses.nestjs.com/).
-- Deploy your application to AWS with the help of [NestJS Mau](https://mau.nestjs.com) in just a few clicks.
-- Visualize your application graph and interact with the NestJS application in real-time using [NestJS Devtools](https://devtools.nestjs.com).
-- Need help with your project (part-time to full-time)? Check out our official [enterprise support](https://enterprise.nestjs.com).
-- To stay in the loop and get updates, follow us on [X](https://x.com/nestframework) and [LinkedIn](https://linkedin.com/company/nestjs).
-- Looking for a job, or have a job to offer? Check out our official [Jobs board](https://jobs.nestjs.com).
-
-## Support
-
-Nest is an MIT-licensed open source project. It can grow thanks to the sponsors and support by the amazing backers. If you'd like to join them, please [read more here](https://docs.nestjs.com/support).
-
-## Stay in touch
-
-- Author - [Kamil Myśliwiec](https://twitter.com/kammysliwiec)
-- Website - [https://nestjs.com](https://nestjs.com/)
-- Twitter - [@nestframework](https://twitter.com/nestframework)
 
 ## License
 
-Nest is [MIT licensed](https://github.com/nestjs/nest/blob/master/LICENSE).
+MIT
