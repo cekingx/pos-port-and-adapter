@@ -1,5 +1,6 @@
-import { CalculateTaxCommand } from '../../domain/types';
-import type { RoundingStrategyPort } from '../../ports/driven/rounding-strategy.port';
+import { CalculateTaxCommand, TaxResult } from '../../domain/types';
+import { Result } from '../../domain/result';
+import { TaxDomainError } from '../../domain/errors';
 import type { TaxJurisdictionRepositoryPort } from '../../ports/driven/tax-jurisdiction-repository.port';
 import type { TaxAuditLogPort } from '../../ports/driven/tax-audit-log.port';
 import { HalfUpRoundingAdapter } from '../../../adapters/rounding/half-up-rounding.adapter';
@@ -13,11 +14,24 @@ const stubJurisdictionRepo = (rate: number): TaxJurisdictionRepositoryPort => ({
   },
 });
 
+const nullJurisdictionRepo: TaxJurisdictionRepositoryPort = {
+  async findByCode() {
+    return null;
+  },
+};
+
 const noopAuditLog: TaxAuditLogPort = {
   async persist() {},
 };
 
 // ─── Helper ──────────────────────────────────────────────────────
+
+function unwrap(result: Result<TaxResult, TaxDomainError>): TaxResult {
+  if (!result.ok) {
+    throw new Error(`Expected ok result, got error: ${result.error.type}`);
+  }
+  return result.value;
+}
 
 function buildCommand(
   overrides: Partial<CalculateTaxCommand> & {
@@ -43,6 +57,34 @@ function buildCommand(
   return { command, useCase };
 }
 
+// ─── Error: Jurisdiction Not Found ──────────────────────────────
+
+describe('Jurisdiction not found', () => {
+  it('returns a JURISDICTION_NOT_FOUND error', async () => {
+    const useCase = new CalculateTaxUseCase(
+      new HalfUpRoundingAdapter(),
+      nullJurisdictionRepo,
+      noopAuditLog,
+    );
+
+    const command: CalculateTaxCommand = {
+      billId: 'bill-test',
+      lineItems: [{ id: '1', name: 'Item', price: 5.0, quantity: 1 }],
+      jurisdictionCode: 'UNKNOWN',
+      taxMode: 'exclusive',
+      currency: 'USD',
+    };
+
+    const result = await useCase.execute(command);
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.type).toBe('JURISDICTION_NOT_FOUND');
+      expect(result.error.jurisdictionCode).toBe('UNKNOWN');
+    }
+  });
+});
+
 // ─── TC-01: Normal Bill, No FOC ─────────────────────────────────
 
 describe('TC-01: Normal bill with no FOC', () => {
@@ -55,7 +97,7 @@ describe('TC-01: Normal bill with no FOC', () => {
       taxRate: 0.1,
     });
 
-    const result = await useCase.execute(command);
+    const result = unwrap(await useCase.execute(command));
 
     expect(result.totalTaxBase.toDecimal()).toBe(14.0);
     expect(result.totalTaxAmount.toDecimal()).toBe(1.4);
@@ -82,7 +124,7 @@ describe('TC-02: Item-level FOC, zero_rated', () => {
       taxRate: 0.1,
     });
 
-    const result = await useCase.execute(command);
+    const result = unwrap(await useCase.execute(command));
 
     expect(result.totalTaxBase.toDecimal()).toBe(10.0);
     expect(result.totalTaxAmount.toDecimal()).toBe(1.0);
@@ -109,7 +151,7 @@ describe('TC-03: Item-level FOC, notional_value', () => {
       taxRate: 0.1,
     });
 
-    const result = await useCase.execute(command);
+    const result = unwrap(await useCase.execute(command));
 
     expect(result.totalTaxBase.toDecimal()).toBe(14.0);
     expect(result.totalTaxAmount.toDecimal()).toBe(1.4);
@@ -134,7 +176,7 @@ describe('TC-04: Bill-level FOC, merchant_absorbs', () => {
       taxRate: 0.1,
     });
 
-    const result = await useCase.execute(command);
+    const result = unwrap(await useCase.execute(command));
 
     expect(result.totalTaxBase.toDecimal()).toBe(110.0);
     expect(result.totalTaxAmount.toDecimal()).toBe(11.0);
@@ -156,7 +198,7 @@ describe('TC-05: Bill-level FOC, zero_rated', () => {
       taxRate: 0.1,
     });
 
-    const result = await useCase.execute(command);
+    const result = unwrap(await useCase.execute(command));
 
     expect(result.totalTaxBase.toDecimal()).toBe(0.0);
     expect(result.totalTaxAmount.toDecimal()).toBe(0.0);
@@ -197,7 +239,7 @@ describe('TC-06: Invariant — totals never negative', () => {
     'holds for scenario %#',
     async (def) => {
       const { command, useCase } = buildCommand(def);
-      const result = await useCase.execute(command);
+      const result = unwrap(await useCase.execute(command));
 
       expect(result.totalCustomerPays.toDecimal()).toBeGreaterThanOrEqual(0);
       expect(result.totalTaxAmount.toDecimal()).toBeGreaterThanOrEqual(0);
@@ -219,7 +261,7 @@ describe('TC-07: Rounding applied once on total, not summed from per-item', () =
       taxRate: 0.1,
     });
 
-    const result = await useCase.execute(command);
+    const result = unwrap(await useCase.execute(command));
 
     expect(result.totalTaxAmount.toDecimal()).toBe(0.1);
   });
@@ -234,7 +276,7 @@ describe('Audit trail', () => {
       taxRate: 0.1,
     });
 
-    const result = await useCase.execute(command);
+    const result = unwrap(await useCase.execute(command));
 
     expect(result.auditTrail.length).toBeGreaterThan(0);
     expect(result.auditTrail[0].step).toBe(1);

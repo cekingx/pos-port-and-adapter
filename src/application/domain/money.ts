@@ -1,3 +1,6 @@
+import { MoneyError } from './errors';
+import { Result, ok, fail } from './result';
+
 /**
  * Immutable monetary value stored in integer subunits (1/10000 of currency unit).
  * Uses bigint to prevent floating-point arithmetic errors.
@@ -27,14 +30,16 @@ export class Money {
     return this.subunits;
   }
 
-  add(other: Money): Money {
-    this.assertSameCurrency(other);
-    return new Money(this.subunits + other.subunits, this.currency);
+  add(other: Money): Result<Money, MoneyError> {
+    const error = this.checkSameCurrency(other);
+    if (error) return fail(error);
+    return ok(new Money(this.subunits + other.subunits, this.currency));
   }
 
-  subtract(other: Money): Money {
-    this.assertSameCurrency(other);
-    return new Money(this.subunits - other.subunits, this.currency);
+  subtract(other: Money): Result<Money, MoneyError> {
+    const error = this.checkSameCurrency(other);
+    if (error) return fail(error);
+    return ok(new Money(this.subunits - other.subunits, this.currency));
   }
 
   negate(): Money {
@@ -63,11 +68,14 @@ export class Money {
     return this.currency === other.currency && this.subunits === other.subunits;
   }
 
-  private assertSameCurrency(other: Money): void {
+  private checkSameCurrency(other: Money): MoneyError | null {
     if (this.currency !== other.currency) {
-      throw new Error(
-        `Currency mismatch: ${this.currency} vs ${other.currency}`,
-      );
+      return {
+        type: 'CURRENCY_MISMATCH',
+        left: this.currency,
+        right: other.currency,
+      };
     }
+    return null;
   }
 }

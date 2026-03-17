@@ -1,3 +1,5 @@
+import { TaxDomainError } from '../../domain/errors';
+import { Result } from '../../domain/result';
 import { CalculateTaxCommand, TaxResult } from '../../domain/types';
 
 export const CALCULATE_TAX_PORT = Symbol('CalculateTaxPort');
@@ -14,5 +16,7 @@ export const CALCULATE_TAX_PORT = Symbol('CalculateTaxPort');
  *  - auditTrail is always populated, even for $0 results
  */
 export interface CalculateTaxPort {
-  execute(command: CalculateTaxCommand): Promise<TaxResult>;
+  execute(
+    command: CalculateTaxCommand,
+  ): Promise<Result<TaxResult, TaxDomainError>>;
 }

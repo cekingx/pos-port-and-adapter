@@ -1,5 +1,7 @@
 import { Inject, Injectable } from '@nestjs/common';
+import { TaxDomainError } from '../domain/errors';
 import { Money } from '../domain/money';
+import { Result, ok, fail } from '../domain/result';
 import {
   AuditStep,
   Bill,
@@ -15,6 +17,22 @@ import type { TaxJurisdictionRepositoryPort } from '../ports/driven/tax-jurisdic
 import { TAX_JURISDICTION_REPOSITORY_PORT } from '../ports/driven/tax-jurisdiction-repository.port';
 import type { TaxAuditLogPort } from '../ports/driven/tax-audit-log.port';
 import { TAX_AUDIT_LOG_PORT } from '../ports/driven/tax-audit-log.port';
+
+/**
+ * Reduce an array of Money values via addition, returning Result.
+ */
+function sumMoney(
+  items: Money[],
+  zero: Money,
+): Result<Money, TaxDomainError> {
+  let acc = zero;
+  for (const item of items) {
+    const result = acc.add(item);
+    if (!result.ok) return result;
+    acc = result.value;
+  }
+  return ok(acc);
+}
 
 /**
  * Use case: Calculate tax for a bill with FOC support.
@@ -43,15 +61,18 @@ export class CalculateTaxUseCase implements CalculateTaxPort {
     private readonly auditLog: TaxAuditLogPort,
   ) {}
 
-  async execute(command: CalculateTaxCommand): Promise<TaxResult> {
+  async execute(
+    command: CalculateTaxCommand,
+  ): Promise<Result<TaxResult, TaxDomainError>> {
     // 1. Look up jurisdiction via driven port
     const jurisdiction = await this.jurisdictionRepo.findByCode(
       command.jurisdictionCode,
     );
     if (!jurisdiction) {
-      throw new Error(
-        `Unknown tax jurisdiction: ${command.jurisdictionCode}`,
-      );
+      return fail({
+        type: 'JURISDICTION_NOT_FOUND',
+        jurisdictionCode: command.jurisdictionCode,
+      });
     }
 
     // 2. Build domain Bill from command
@@ -80,16 +101,17 @@ export class CalculateTaxUseCase implements CalculateTaxPort {
 
     // 3. Calculate tax
     const result = this.calculateTax(bill);
+    if (!result.ok) return result;
 
     // 4. Persist audit trail via driven port
-    await this.auditLog.persist(result);
+    await this.auditLog.persist(result.value);
 
     return result;
   }
 
   // ─── Business Logic (BR-01 through BR-04) ───────────────────────
 
-  private calculateTax(bill: Bill): TaxResult {
+  private calculateTax(bill: Bill): Result<TaxResult, TaxDomainError> {
     const auditTrail: AuditStep[] = [];
     const currency = bill.lineItems[0]?.originalPrice.currency ?? 'USD';
 
@@ -97,22 +119,29 @@ export class CalculateTaxUseCase implements CalculateTaxPort {
     const effectiveItems = this.resolveEffectiveItems(bill, auditTrail);
 
     // BR-03 Step 4: Calculate tax base per item
-    const lineItemResults = effectiveItems.map((item) =>
-      this.calculateLineItemTax(item, bill, auditTrail),
-    );
+    const lineItemResults: LineItemTaxResult[] = [];
+    for (const item of effectiveItems) {
+      const result = this.calculateLineItemTax(item, bill, auditTrail);
+      if (!result.ok) return result;
+      lineItemResults.push(result.value);
+    }
 
     // BR-03 Step 5: Sum tax bases
-    const totalTaxBase = lineItemResults.reduce(
-      (acc, r) => acc.add(r.effectiveTaxBase),
+    const totalTaxBaseResult = sumMoney(
+      lineItemResults.map((r) => r.effectiveTaxBase),
       Money.zero(currency),
     );
+    if (!totalTaxBaseResult.ok) return totalTaxBaseResult;
+    const totalTaxBase = totalTaxBaseResult.value;
 
     // BR-03 Step 6: Apply tax rate to total tax base (NOT sum of per-item taxes)
     const rawTax = totalTaxBase.multiplyByRate(bill.jurisdiction.rate);
 
     // BR-04: Apply rounding ONCE on total (via driven port)
     const roundedTax = this.roundingStrategy.apply(rawTax);
-    const roundingDifference = roundedTax.subtract(rawTax);
+    const roundingDiffResult = roundedTax.subtract(rawTax);
+    if (!roundingDiffResult.ok) return roundingDiffResult;
+    const roundingDifference = roundingDiffResult.value;
 
     auditTrail.push({
       step: auditTrail.length + 1,
@@ -123,34 +152,41 @@ export class CalculateTaxUseCase implements CalculateTaxPort {
     });
 
     // BR-03 Step 8: Compute customer and merchant totals
-    const customerItemTotal = lineItemResults.reduce(
-      (acc, r) => acc.add(r.customerPays),
+    const customerItemTotalResult = sumMoney(
+      lineItemResults.map((r) => r.customerPays),
       Money.zero(currency),
     );
+    if (!customerItemTotalResult.ok) return customerItemTotalResult;
+    const customerItemTotal = customerItemTotalResult.value;
 
-    const customerTaxPortion = this.calculateCustomerTaxPortion(
+    const customerTaxPortionResult = this.calculateCustomerTaxPortion(
       lineItemResults,
       roundedTax,
       bill,
     );
+    if (!customerTaxPortionResult.ok) return customerTaxPortionResult;
 
-    const totalCustomerPays = customerItemTotal.add(customerTaxPortion);
+    const totalCustomerPaysResult = customerItemTotal.add(
+      customerTaxPortionResult.value,
+    );
+    if (!totalCustomerPaysResult.ok) return totalCustomerPaysResult;
 
-    const totalMerchantAbsorbs = lineItemResults.reduce(
-      (acc, r) => acc.add(r.merchantAbsorbs),
+    const totalMerchantAbsorbsResult = sumMoney(
+      lineItemResults.map((r) => r.merchantAbsorbs),
       Money.zero(currency),
     );
+    if (!totalMerchantAbsorbsResult.ok) return totalMerchantAbsorbsResult;
 
-    return {
+    return ok({
       billId: bill.id,
       lineItemResults,
       totalTaxBase,
       totalTaxAmount: roundedTax,
-      totalCustomerPays,
-      totalMerchantAbsorbs,
+      totalCustomerPays: totalCustomerPaysResult.value,
+      totalMerchantAbsorbs: totalMerchantAbsorbsResult.value,
       roundingDifference,
       auditTrail,
-    };
+    });
   }
 
   /**
@@ -184,7 +220,7 @@ export class CalculateTaxUseCase implements CalculateTaxPort {
     item: LineItem,
     bill: Bill,
     audit: AuditStep[],
-  ): LineItemTaxResult {
+  ): Result<LineItemTaxResult, TaxDomainError> {
     const basePrice = item.discountedPrice;
 
     if (!item.isFoc || !item.focPolicy) {
@@ -198,7 +234,7 @@ export class CalculateTaxUseCase implements CalculateTaxPort {
         rule: 'Standard taxable item',
       });
 
-      return {
+      return ok({
         lineItemId: item.id,
         originalPrice: item.originalPrice,
         effectiveTaxBase: taxBase,
@@ -206,7 +242,7 @@ export class CalculateTaxUseCase implements CalculateTaxPort {
         customerPays: basePrice,
         merchantAbsorbs: Money.zero(basePrice.currency),
         auditSteps: [],
-      };
+      });
     }
 
     return this.applyFocTreatment(item, bill, audit);
@@ -222,7 +258,7 @@ export class CalculateTaxUseCase implements CalculateTaxPort {
     item: LineItem,
     bill: Bill,
     audit: AuditStep[],
-  ): LineItemTaxResult {
+  ): Result<LineItemTaxResult, TaxDomainError> {
     const policy = item.focPolicy!;
     const basePrice = item.discountedPrice;
     const currency = basePrice.currency;
@@ -237,7 +273,7 @@ export class CalculateTaxUseCase implements CalculateTaxPort {
           rule: 'Policy A: zero_rated removes item from tax base',
         });
 
-        return {
+        return ok({
           lineItemId: item.id,
           originalPrice: item.originalPrice,
           effectiveTaxBase: Money.zero(currency),
@@ -245,11 +281,13 @@ export class CalculateTaxUseCase implements CalculateTaxPort {
           customerPays: Money.zero(currency),
           merchantAbsorbs: Money.zero(currency),
           auditSteps: [],
-        };
+        });
       }
 
       case 'notional_value': {
         const notionalTax = basePrice.multiplyByRate(bill.jurisdiction.rate);
+        const merchantAbsorbsResult = basePrice.add(notionalTax);
+        if (!merchantAbsorbsResult.ok) return merchantAbsorbsResult;
 
         audit.push({
           step: audit.length + 1,
@@ -259,37 +297,39 @@ export class CalculateTaxUseCase implements CalculateTaxPort {
           rule: 'Policy B: notional_value keeps full price as tax base, merchant liability',
         });
 
-        return {
+        return ok({
           lineItemId: item.id,
           originalPrice: item.originalPrice,
           effectiveTaxBase: basePrice,
           taxAmount: notionalTax,
           customerPays: Money.zero(currency),
-          merchantAbsorbs: basePrice.add(notionalTax),
+          merchantAbsorbs: merchantAbsorbsResult.value,
           auditSteps: [],
-        };
+        });
       }
 
       case 'merchant_absorbs': {
         const tax = basePrice.multiplyByRate(bill.jurisdiction.rate);
+        const merchantAbsorbsResult = basePrice.add(tax);
+        if (!merchantAbsorbsResult.ok) return merchantAbsorbsResult;
 
         audit.push({
           step: audit.length + 1,
           description: `[${item.name}] FOC merchant_absorbs — full price+tax absorbed by merchant`,
           inputValue: `price ${basePrice.toDecimal()}, tax ${tax.toDecimal()}`,
-          outputValue: `merchant absorbs ${basePrice.add(tax).toDecimal()}`,
+          outputValue: `merchant absorbs ${merchantAbsorbsResult.value.toDecimal()}`,
           rule: 'Policy C: merchant_absorbs — merchant covers price and tax',
         });
 
-        return {
+        return ok({
           lineItemId: item.id,
           originalPrice: item.originalPrice,
           effectiveTaxBase: basePrice,
           taxAmount: tax,
           customerPays: Money.zero(currency),
-          merchantAbsorbs: basePrice.add(tax),
+          merchantAbsorbs: merchantAbsorbsResult.value,
           auditSteps: [],
-        };
+        });
       }
     }
   }
@@ -302,7 +342,7 @@ export class CalculateTaxUseCase implements CalculateTaxPort {
     results: LineItemTaxResult[],
     roundedTotalTax: Money,
     bill: Bill,
-  ): Money {
+  ): Result<Money, TaxDomainError> {
     const currency = roundedTotalTax.currency;
 
     const allMerchantOrZero = results.every(
@@ -310,18 +350,20 @@ export class CalculateTaxUseCase implements CalculateTaxPort {
     );
 
     if (allMerchantOrZero) {
-      return Money.zero(currency);
+      return ok(Money.zero(currency));
     }
 
-    const customerTaxBase = results
+    const taxBases = results
       .filter((r) => r.customerPays.isPositive())
-      .reduce(
-        (acc, r) => acc.add(r.effectiveTaxBase),
-        Money.zero(currency),
-      );
+      .map((r) => r.effectiveTaxBase);
 
-    return this.roundingStrategy.apply(
-      customerTaxBase.multiplyByRate(bill.jurisdiction.rate),
+    const customerTaxBaseResult = sumMoney(taxBases, Money.zero(currency));
+    if (!customerTaxBaseResult.ok) return customerTaxBaseResult;
+
+    return ok(
+      this.roundingStrategy.apply(
+        customerTaxBaseResult.value.multiplyByRate(bill.jurisdiction.rate),
+      ),
     );
   }
 }

@@ -3,7 +3,7 @@ import { ConfigModule, ConfigService } from '@nestjs/config';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
-import { TaxModule } from './tax.module';
+import { TaxModule } from './tax/tax.module';
 import { TaxJurisdictionEntity } from './adapters/persistence/entities/tax-jurisdiction.entity';
 import { TaxAuditLogEntity } from './adapters/persistence/entities/tax-audit-log.entity';
 
