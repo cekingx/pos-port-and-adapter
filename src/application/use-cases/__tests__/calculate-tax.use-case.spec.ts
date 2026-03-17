@@ -2,7 +2,7 @@ import { CalculateTaxCommand } from '../../domain/types';
 import type { RoundingStrategyPort } from '../../ports/driven/rounding-strategy.port';
 import type { TaxJurisdictionRepositoryPort } from '../../ports/driven/tax-jurisdiction-repository.port';
 import type { TaxAuditLogPort } from '../../ports/driven/tax-audit-log.port';
-import { HalfUpRoundingAdapter } from '../../../adapters/driven/rounding/half-up-rounding.adapter';
+import { HalfUpRoundingAdapter } from '../../../adapters/rounding/half-up-rounding.adapter';
 import { CalculateTaxUseCase } from '../calculate-tax.use-case';
 
 // ─── Stub driven adapters ────────────────────────────────────────

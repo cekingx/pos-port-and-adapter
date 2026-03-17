@@ -1,7 +1,7 @@
 import { Body, Controller, Inject, Post } from '@nestjs/common';
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
-import type { CalculateTaxPort } from '../../../application/ports/driving/calculate-tax.port';
-import { CALCULATE_TAX_PORT } from '../../../application/ports/driving/calculate-tax.port';
+import type { CalculateTaxPort } from '../../application/ports/driving/calculate-tax.port';
+import { CALCULATE_TAX_PORT } from '../../application/ports/driving/calculate-tax.port';
 import { CalculateTaxDto } from './dto/calculate-tax.dto';
 
 /**

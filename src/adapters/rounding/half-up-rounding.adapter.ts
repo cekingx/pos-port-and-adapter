@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
-import { Money } from '../../../application/domain/money';
-import type { RoundingStrategyPort } from '../../../application/ports/driven/rounding-strategy.port';
+import { Money } from '../../application/domain/money';
+import type { RoundingStrategyPort } from '../../application/ports/driven/rounding-strategy.port';
 
 /**
  * Driven adapter: half-up rounding to the nearest cent.

@@ -3,7 +3,7 @@ import type {
   FocReason,
   FocTaxTreatment,
   TaxMode,
-} from '../../../../application/domain/types';
+} from '../../../application/domain/types';
 
 export class FocDto {
   @ApiProperty({
